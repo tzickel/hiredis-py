@@ -9,12 +9,17 @@ static PyObject *Reader_feed(hiredis_ReaderObject *self, PyObject *args);
 static PyObject *Reader_gets(hiredis_ReaderObject *self);
 static PyObject *Reader_setmaxbuf(hiredis_ReaderObject *self, PyObject *arg);
 static PyObject *Reader_getmaxbuf(hiredis_ReaderObject *self);
+static PyObject *Reader_setstringcallback(hiredis_ReaderObject *self, PyObject *arg);
+static PyObject *Reader_getstringcallback(hiredis_ReaderObject *self);
+
 
 static PyMethodDef hiredis_ReaderMethods[] = {
     {"feed", (PyCFunction)Reader_feed, METH_VARARGS, NULL },
     {"gets", (PyCFunction)Reader_gets, METH_NOARGS, NULL },
     {"setmaxbuf", (PyCFunction)Reader_setmaxbuf, METH_O, NULL },
     {"getmaxbuf", (PyCFunction)Reader_getmaxbuf, METH_NOARGS, NULL },
+    {"setstringcallback", (PyCFunction)Reader_setstringcallback, METH_O, NULL},
+    {"getstringcallback", (PyCFunction)Reader_getstringcallback, METH_NOARGS, NULL},
     { NULL }  /* Sentinel */
 };
 
@@ -69,11 +74,39 @@ static void *tryParentize(const redisReadTask *task, PyObject *obj) {
     return obj;
 }
 
+static PyObject *tryWritingToBuffer(hiredis_ReaderObject *self, const char *str, size_t len) {
+    Py_buffer view;
+    PyObject* args = PyTuple_Pack(1, PyLong_FromSize_t(len));
+    PyObject* buffer = PyObject_CallObject(self->stringCreateCallback, args);
+    Py_DECREF(args);
+    if (buffer == NULL) {
+        return NULL;
+    }
+    if (!PyObject_CheckBuffer(buffer)) {
+        Py_DECREF(buffer);
+        return NULL;
+    }
+    if (PyObject_GetBuffer(buffer, &view, PyBUF_WRITABLE) != 0) {
+        Py_DECREF(buffer);
+        return NULL;
+    }
+    if (view.len < len) {
+        PyBuffer_Release(&view);
+        Py_DECREF(buffer);
+        return NULL;
+    }
+    memcpy(view.buf, str, len);
+    PyBuffer_Release(&view);
+    return buffer;
+}
+
 static PyObject *createDecodedString(hiredis_ReaderObject *self, const char *str, size_t len) {
     PyObject *obj;
 
     if (self->encoding == NULL) {
-        obj = PyBytes_FromStringAndSize(str, len);
+        if (self->stringCreateCallback == Py_None || (obj = tryWritingToBuffer(self, str, len)) == NULL) {
+            obj = PyBytes_FromStringAndSize(str, len);
+        }
     } else {
         obj = PyUnicode_Decode(str, len, self->encoding, NULL);
         if (obj == NULL) {
@@ -162,6 +195,7 @@ static void Reader_dealloc(hiredis_ReaderObject *self) {
         free(self->encoding);
     Py_XDECREF(self->protocolErrorClass);
     Py_XDECREF(self->replyErrorClass);
+    Py_XDECREF(self->stringCreateCallback);
 
     ((PyObject *)self)->ob_type->tp_free((PyObject*)self);
 }
@@ -240,6 +274,9 @@ static PyObject *Reader_new(PyTypeObject *type, PyObject *args, PyObject *kwds) 
         self->error.ptype = NULL;
         self->error.pvalue = NULL;
         self->error.ptraceback = NULL;
+
+        self->stringCreateCallback = Py_None;
+        Py_INCREF(self->stringCreateCallback);
     }
     return (PyObject*)self;
 }
@@ -331,4 +368,21 @@ static PyObject *Reader_setmaxbuf(hiredis_ReaderObject *self, PyObject *arg) {
 
 static PyObject *Reader_getmaxbuf(hiredis_ReaderObject *self) {
     return PyLong_FromSize_t(self->reader->maxbuf);
+}
+
+static PyObject *Reader_setstringcallback(hiredis_ReaderObject *self, PyObject *arg) {
+    if (arg != Py_None && !PyCallable_Check(arg)) {
+        PyErr_SetString(PyExc_TypeError, "Expected a callable or None");
+        return NULL;
+    }
+    Py_DECREF(self->stringCreateCallback);
+    self->stringCreateCallback = arg;
+    Py_INCREF(self->stringCreateCallback);
+    Py_INCREF(Py_None);
+    return Py_None;
+}
+
+static PyObject *Reader_getstringcallback(hiredis_ReaderObject *self) {
+    Py_INCREF(self->stringCreateCallback);
+    return self->stringCreateCallback;
 }

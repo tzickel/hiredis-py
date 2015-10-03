@@ -179,3 +179,15 @@ class ReaderTest(TestCase):
     self.reader.setmaxbuf(None)
     self.assertEquals(defaultmaxbuf, self.reader.getmaxbuf())
     self.assertRaises(ValueError, self.reader.setmaxbuf, -4)
+
+  def test_stringcallback(self):
+    import ctypes
+    def callback(length):
+      return ctypes.create_string_buffer(length)
+    self.reader.setstringcallback(callback)
+    self.reader.feed(b"$5\r\nhello\r\n")
+    ret = self.reader.gets()
+    self.assertEquals(ctypes.c_char * 5, type(ret))
+    self.assertEquals(b"hello", ret.value)
+    self.reader.setstringcallback(None)
+    self.assertEquals(None, self.reader.getstringcallback())
